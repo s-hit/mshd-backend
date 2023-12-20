@@ -21,7 +21,7 @@ const auth = expressjwt({
   secret: secretKey,
   algorithms: ['HS256'],
   getToken: req => req.headers.authorization || null,
-}).unless({ path: ['/login', '/map'] })
+}).unless({ path: ['/login', '/messageIso'] })
 
 // express 是后端框架.
 import express, { Request, Response } from 'express'
@@ -47,6 +47,13 @@ const axios = new Axios({})
 
 // formidable 用于解析 form-data.
 import formidable from 'formidable'
+const form = formidable({
+  multiples: true,
+  uploadDir: './public/images',
+  keepExtensions: true,
+  allowEmptyFiles: true,
+  minFileSize: 0,
+})
 
 // jimp 用于图像处理.
 import jimp from 'jimp'
@@ -179,6 +186,53 @@ async function getAuthUser(request: Request, response: Response) {
   return user
 }
 
+async function postMessage(fields: formidable.Fields, files: formidable.Files) {
+  let fileList = files.file ?? []
+  fileList = fileList.filter(file => file.size)
+
+  const fileValid = fileList.every(file => {
+    const extName = file.mimetype.split('/')[1]
+    console.log(extName)
+    const size = file.size / 1024 / 1024
+    return ['jpeg', 'jpg', 'png'].includes(extName) && size <= 10
+  })
+  if (!fileValid) return '只能上传 JPEG 或 PNG 格式且不超过 10 MiB 的图片。'
+
+  const description = fields.description?.[0]
+  const _lng = fields.lng?.[0]
+  const _lat = fields.lat?.[0]
+  const _type = fields.type?.[0]
+  const _time = fields.time?.[0]
+
+  const lng = parseFloat(_lng) || undefined
+  const lat = parseFloat(_lat) || undefined
+  const timestamp = new Date(_time).getTime()
+  const time = timestamp && timestamp <= Date.now() ? new Date(_time) : new Date()
+
+  const area = await getArea(lng, lat)
+  const date = getDate(time)
+  const type = parseInt(_type) || 0
+
+  let relation = await MessageDatum.findOne({ where: { area, date, type } })
+  if (relation === null) {
+    const event = await Event.create({ name: `${date.slice(0, 10)} ${area}${types[type]}` })
+    const EventId = event.dataValues.id
+    relation = await MessageDatum.create({ area, date, type, EventId })
+  }
+  const MessageDatumId = relation.dataValues.id
+
+  const message = await Message.create({ description, lng, lat, time, MessageDatumId })
+  const MessageId = message.dataValues.id
+
+  for (const file of fileList) {
+    const img = await jimp.read(file.filepath)
+    img.cover(128, 128).write(`./public/thumbnails/${file.newFilename}`)
+    await Attachment.create({ fileName: file.newFilename, MessageId })
+  }
+
+  return true
+}
+
 app.get('/page/home', async (request, response) => {
   const user = await getAuthUser(request, response)
   if (!user) return
@@ -301,13 +355,8 @@ app.post('/login', async (request, response) => {
     return response.status(403).send({ status: 'failed', message: '请输入用户名与密码。' })
 
   const user = await User.findOne({ where: { name } })
-
-  if (user !== null) {
-    if (user.dataValues.password !== password)
-      return response.status(403).send({ status: 'failed', message: '密码错误。' })
-  } else {
-    await User.create({ name, password })
-  }
+  if (user && user.dataValues.password !== password) return response.status(403).send('密码错误。')
+  if (!user) await User.create({ name: name, password })
 
   const token = jwt.sign({ name }, secretKey)
   return response.send({ status: 'success', token })
@@ -315,70 +364,36 @@ app.post('/login', async (request, response) => {
 
 app.post('/message', async (request, response) => {
   if (!(await getAuthUser(request, response))) return
-
-  const form = formidable({
-    multiples: true,
-    uploadDir: './public/images',
-    keepExtensions: true,
-  })
-
   try {
     const [fields, files] = await form.parse(request)
-    const fileList = files.file ?? []
-    // console.log(fields, files)
-
-    const fileValid = fileList.every(file => {
-      const extName = file.mimetype.split('/')[1]
-      console.log(extName)
-      const size = file.size / 1024 / 1024
-      return ['jpeg', 'jpg', 'png'].includes(extName) && size <= 10
-    })
-    if (!fileValid)
-      return response.send({
-        status: 'failed',
-        message: '只能上传 JPEG 或 PNG 格式且不超过 10 MiB 的图片。',
-      })
-
-    const description = fields.description?.[0]
-    const _lng = fields.lng?.[0]
-    const _lat = fields.lat?.[0]
-    const _type = fields.type?.[0]
-    const _time = fields.time?.[0]
-
-    const lng = parseFloat(_lng) || undefined
-    const lat = parseFloat(_lat) || undefined
-    const timestamp = new Date(_time).getTime()
-    const time = timestamp && timestamp <= Date.now() ? new Date(_time) : new Date()
-
-    const area = await getArea(lng, lat)
-    const date = getDate(time)
-    const type = parseInt(_type) || 0
-
-    let relation = await MessageDatum.findOne({ where: { area, date, type } })
-    if (relation === null) {
-      const event = await Event.create({ name: `${date.slice(0, 10)} ${area}${types[type]}` })
-      const EventId = event.dataValues.id
-      relation = await MessageDatum.create({ area, date, type, EventId })
-    }
-    const MessageDatumId = relation.dataValues.id
-
-    const message = await Message.create({ description, lng, lat, time, MessageDatumId })
-    const MessageId = message.dataValues.id
-
-    for (const file of fileList) {
-      const img = await jimp.read(file.filepath)
-      img.cover(128, 128).write(`./public/thumbnails/${file.newFilename}`)
-      await Attachment.create({ fileName: file.newFilename, MessageId })
-    }
-
-    response.send({
-      status: 'success',
-    })
+    const result = await postMessage(fields, files)
+    if (typeof result === 'string') return response.send({ status: 'failed', message: result })
+    response.send({ status: 'success' })
   } catch (error) {
-    response.status(500).send({
-      status: 'failed',
-      message: '服务器内部错误。',
-    })
+    response.status(500).send({ status: 'failed', message: '服务器内部错误。' })
+  }
+})
+
+app.post('/messageIso', async (request, response) => {
+  try {
+    const [fields, files] = await form.parse(request)
+    console.log(fields, files)
+
+    const userName = fields.userName?.[0]
+    const password = fields.password?.[0]
+    if (!userName || !password) return response.status(403).send('请输入用户名与密码。')
+
+    let user = await User.findOne({ where: { name: userName } })
+    if (user && user.dataValues.password !== password)
+      return response.status(403).send('密码错误。')
+    if (!user) await User.create({ name: userName, password })
+
+    const result = await postMessage(fields, files)
+    if (typeof result === 'string') return response.send(result)
+    response.send('上传成功。')
+  } catch (error) {
+    console.log(error)
+    response.status(500).send('服务器内部错误。')
   }
 })
 
