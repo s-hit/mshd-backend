@@ -180,10 +180,14 @@ async function getAuthUser(request: Request, response: Response) {
 }
 
 app.get('/page/home', async (request, response) => {
-  if (!(await getAuthUser(request, response))) return
+  const user = await getAuthUser(request, response)
+  if (!user) return
 
   const today = { createdAt: { [Op.gt]: getDate(new Date()) } }
   const todayMessages = await Message.findAll({ where: today, limit: 20 })
+
+  const attachment = await Attachment.findOne({ order: [['createdAt', 'DESC']] })
+  const lastFile = attachment ? attachment.dataValues.fileName : null
 
   response.send({
     status: 'success',
@@ -191,6 +195,7 @@ app.get('/page/home', async (request, response) => {
     totalMessages: await Message.count(),
     todayMessages: await Message.count({ where: today }),
     todayCoords: todayMessages.map(message => [message.dataValues.lng, message.dataValues.lat]),
+    lastFile,
   })
 })
 
@@ -247,6 +252,44 @@ app.get('/page/events', async (request, response) => {
     status: 'success',
     events,
     maxPage: Math.ceil(count / 20),
+  })
+})
+
+app.get('/page/stats', async (request, response) => {
+  if (!(await getAuthUser(request, response))) return
+
+  response.send({
+    status: 'success',
+    messages: await Message.count(),
+    events: await Event.count(),
+    attachments: await Attachment.count(),
+    users: await User.count(),
+    messagesByArea: await MessageDatum.findAll({
+      include: [{ model: Message, attributes: [] }],
+      attributes: ['area', [sequelize.fn('COUNT', sequelize.col('area')), 'count']],
+      order: [['count', 'DESC']],
+      group: 'area',
+      raw: true,
+    }),
+    messagesByType: await MessageDatum.findAll({
+      include: [{ model: Message, attributes: [] }],
+      attributes: ['type', [sequelize.fn('COUNT', sequelize.col('type')), 'count']],
+      order: [['count', 'DESC']],
+      group: 'type',
+      raw: true,
+    }),
+    messagesByDate: await MessageDatum.findAll({
+      include: [{ model: Message, attributes: [] }],
+      attributes: ['date', [sequelize.fn('COUNT', sequelize.col('date')), 'count']],
+      order: [['date', 'DESC']],
+      where: {
+        date: {
+          [Op.gte]: dayjs(new Date(), 'Asia/Shanghai').add(-7, 'day').format('YYYY-MM-DD 00:00:00'),
+        },
+      },
+      group: 'date',
+      raw: true,
+    }),
   })
 })
 
