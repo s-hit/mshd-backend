@@ -43,10 +43,7 @@ const sequelize = new Sequelize({
 
 // axios 用于发送网络请求.
 import { Axios } from 'axios'
-import https from 'node:https'
-const axios = new Axios({
-  httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-})
+const axios = new Axios({})
 
 // formidable 用于解析 form-data.
 import formidable from 'formidable'
@@ -242,14 +239,14 @@ app.get('/page/events', async (request, response) => {
   const count = await Event.count()
   const events = await Event.findAll({
     order: [['createdAt', 'DESC']],
-    limit: 10,
-    offset: page * 10,
+    limit: 20,
+    offset: page * 20,
   })
 
   response.send({
     status: 'success',
     events,
-    maxPage: Math.ceil(count / 10),
+    maxPage: Math.ceil(count / 20),
   })
 })
 
@@ -307,7 +304,8 @@ app.post('/message', async (request, response) => {
 
     const lng = parseFloat(_lng) || undefined
     const lat = parseFloat(_lat) || undefined
-    const time = new Date(_time).getTime() ? new Date(_time) : undefined
+    const timestamp = new Date(_time).getTime()
+    const time = timestamp && timestamp <= Date.now() ? new Date(_time) : new Date()
 
     const area = await getArea(lng, lat)
     const date = getDate(time)
@@ -315,9 +313,7 @@ app.post('/message', async (request, response) => {
 
     let relation = await MessageDatum.findOne({ where: { area, date, type } })
     if (relation === null) {
-      const event = await Event.create({
-        name: `${date.slice(0, 10)} ${area}${types[type]}`,
-      })
+      const event = await Event.create({ name: `${date.slice(0, 10)} ${area}${types[type]}` })
       const EventId = event.dataValues.id
       relation = await MessageDatum.create({ area, date, type, EventId })
     }
