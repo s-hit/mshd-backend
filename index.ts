@@ -82,18 +82,26 @@ const User = sequelize.define('User', {
 
 const Star = sequelize.define('Star', {})
 
-const Message = sequelize.define('Message', {
-  id: IdAttribute,
-  description: DataTypes.TEXT,
-  lng: DataTypes.DOUBLE,
-  lat: DataTypes.DOUBLE,
-  time: DataTypes.DATE,
-})
+const Message = sequelize.define(
+  'Message',
+  {
+    id: IdAttribute,
+    description: DataTypes.TEXT,
+    lng: DataTypes.DOUBLE,
+    lat: DataTypes.DOUBLE,
+    time: DataTypes.DATE,
+  },
+  { paranoid: true },
+)
 
-const Attachment = sequelize.define('Attachment', {
-  id: IdAttribute,
-  fileName: DataTypes.TEXT,
-})
+const Attachment = sequelize.define(
+  'Attachment',
+  {
+    id: IdAttribute,
+    fileName: DataTypes.TEXT,
+  },
+  { paranoid: true },
+)
 
 const MessageDatum = sequelize.define('MessageDatum', {
   id: IdAttribute,
@@ -109,6 +117,9 @@ const Event = sequelize.define('Event', {
 
 User.hasMany(Star)
 Star.belongsTo(User)
+
+User.hasMany(Message)
+Message.belongsTo(User)
 
 Message.hasMany(Star)
 Star.belongsTo(Message)
@@ -186,7 +197,7 @@ async function getAuthUser(request: Request, response: Response) {
   return user
 }
 
-async function postMessage(fields: formidable.Fields, files: formidable.Files) {
+async function postMessage(fields: formidable.Fields, files: formidable.Files, user: Model) {
   let fileList = files.file ?? []
   fileList = fileList.filter(file => file.size)
 
@@ -219,9 +230,11 @@ async function postMessage(fields: formidable.Fields, files: formidable.Files) {
     const EventId = event.dataValues.id
     relation = await MessageDatum.create({ area, date, type, EventId })
   }
-  const MessageDatumId = relation.dataValues.id
 
-  const message = await Message.create({ description, lng, lat, time, MessageDatumId })
+  const MessageDatumId = relation.dataValues.id
+  const UserId = user.dataValues.id
+
+  const message = await Message.create({ description, lng, lat, time, MessageDatumId, UserId })
   const MessageId = message.dataValues.id
 
   for (const file of fileList) {
@@ -363,10 +376,12 @@ app.post('/login', async (request, response) => {
 })
 
 app.post('/message', async (request, response) => {
-  if (!(await getAuthUser(request, response))) return
+  const user = await getAuthUser(request, response)
+  if (!user) return
+
   try {
     const [fields, files] = await form.parse(request)
-    const result = await postMessage(fields, files)
+    const result = await postMessage(fields, files, user)
     if (typeof result === 'string') return response.send({ status: 'failed', message: result })
     response.send({ status: 'success' })
   } catch (error) {
@@ -386,9 +401,9 @@ app.post('/messageIso', async (request, response) => {
     let user = await User.findOne({ where: { name: userName } })
     if (user && user.dataValues.password !== password)
       return response.status(403).send('密码错误。')
-    if (!user) await User.create({ name: userName, password })
+    if (!user) user = await User.create({ name: userName, password })
 
-    const result = await postMessage(fields, files)
+    const result = await postMessage(fields, files, user)
     if (typeof result === 'string') return response.send(result)
     response.send('上传成功。')
   } catch (error) {
@@ -455,6 +470,32 @@ app.post('/event', async (request, response) => {
 
   await Event.update({ name }, { where: { id } })
   return response.send({ status: 'success' })
+})
+
+app.post('/delete/message', async (request, response) => {
+  const user = await getAuthUser(request, response)
+  if (!user) return
+  if (user.dataValues.name !== 'Admin') return response.status(401).send({ status: 'failed' })
+
+  const MessageId = request.body.id
+  if (typeof MessageId !== 'number') return response.status(403).send({ status: 'failed' })
+
+  const message = await Message.findByPk(MessageId)
+  const MessageDatumId = message.dataValues.MessageDatumId
+  await message.destroy()
+  await Attachment.destroy({ where: { MessageId } })
+
+  const count = await Message.count({ where: { MessageDatumId } })
+  if (count === 0) {
+    const relation = await MessageDatum.findByPk(MessageDatumId)
+    const EventId = relation.dataValues.EventId
+    await relation.destroy()
+
+    const eventCount = await MessageDatum.count({ where: { EventId } })
+    if (eventCount === 0) await Event.destroy({ where: { id: EventId } })
+  }
+
+  response.send({ status: 'success' })
 })
 
 app.listen(1919)
